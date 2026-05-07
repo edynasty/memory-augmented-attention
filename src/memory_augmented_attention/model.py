@@ -92,6 +92,11 @@ class MemoryAugmentedTransformerLayer(nn.Module):
         current_step: int = 0,
         write_to_memory: bool = True,
         attn_mask: Optional[Tensor] = None,
+        causal: bool = False,
+        # 新增参数
+        verdicts=None,
+        source_authority: float = 0.5,
+        memory_type: str = "episodic",
     ) -> Tensor:
         """
         Parameters
@@ -123,6 +128,10 @@ class MemoryAugmentedTransformerLayer(nn.Module):
             current_step=current_step,
             write_to_memory=write_to_memory,
             attn_mask=attn_mask,
+            causal=causal,
+            verdicts=verdicts,
+            source_authority=source_authority,
+            memory_type=memory_type,
         )
         x = self.norm1(x + self.drop1(attn_out))
 

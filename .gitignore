@@ -24,3 +24,4 @@ env/
 .idea/
 .vscode/
 *.swp
+.history

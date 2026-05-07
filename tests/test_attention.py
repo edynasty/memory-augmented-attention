@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from memory_augmented_attention.attention import TimeBias, UnifiedMemoryAttention
+from memory_augmented_attention.attention import TimeBias, DynamicMemoryBias, UnifiedMemoryAttention
 from memory_augmented_attention.memory_bank import MemoryBank
 from memory_augmented_attention.model import MemoryAugmentedTransformerLayer
 
@@ -168,7 +168,8 @@ class TestUnifiedMemoryAttentionWithBank:
         # Second pass without bank.
         out_no_mem = attn(x2, memory_bank=None, write_to_memory=False)
         # Second pass with bank (should see x1's KVs).
-        out_with_mem = attn(x2, memory_bank=bank, current_step=3, write_to_memory=False)
+        out_with_mem = attn(x2, memory_bank=bank,
+                            current_step=3, write_to_memory=False)
 
         diff = (out_no_mem - out_with_mem).abs().max().item()
         assert diff > 1e-5, (
@@ -201,7 +202,8 @@ class TestTransformerLayer:
     def test_layer_with_memory_bank(self):
         bank = MemoryBank(max_size=64)
         x = torch.randn(1, 4, 16)
-        out = self.layer(x, memory_bank=bank, current_step=0, write_to_memory=True)
+        out = self.layer(x, memory_bank=bank, current_step=0,
+                         write_to_memory=True)
         assert out.shape == (1, 4, 16)
         assert len(bank) == 4  # 4 tokens written
 
@@ -228,3 +230,135 @@ class TestTransformerLayer:
         x = torch.randn(2, 6, 16)
         out = self.layer(x, memory_bank=None)
         assert out.shape == (2, 6, 16)
+
+
+# ---------------------------------------------------------------------------
+# DynamicMemoryBias
+# ---------------------------------------------------------------------------
+
+
+class TestDynamicMemoryBias:
+    """测试多维度动态偏置"""
+
+    def test_output_shape(self):
+        """输出形状 (T_q, T_k)"""
+        bias = DynamicMemoryBias(d_model=128, n_dims=4, init_alpha=1.0)
+
+        query_ctx = torch.randn(128)
+        t_q = torch.arange(8).float()
+        t_k = torch.arange(16).float()
+
+        out = bias(query_ctx, t_q, t_k)
+        assert out.shape == (8, 16)
+
+    def test_with_all_metadata(self):
+        """传入全部元数据时输出正确"""
+        bias = DynamicMemoryBias(d_model=128, n_dims=4, init_alpha=1.0)
+
+        query_ctx = torch.randn(128)
+        t_q = torch.arange(5).float()
+        t_k = torch.arange(10).float()
+        verdicts = torch.randn(10).clamp(-1, 1)
+        freqs = torch.randint(0, 10, (10,)).float()
+        sources = torch.rand(10)
+
+        out = bias(query_ctx, t_q, t_k, verdicts, freqs, sources)
+        assert out.shape == (5, 10)
+        assert torch.isfinite(out).all()
+
+    def test_no_metadata_degradation(self):
+        """无元数据时退化为纯时间偏置"""
+        bias = DynamicMemoryBias(d_model=128, n_dims=4, init_alpha=1.0)
+
+        query_ctx = torch.randn(128)
+        t_q = torch.arange(5).float()
+        t_k = torch.arange(10).float()
+
+        # 无元数据
+        out_no_meta = bias(query_ctx, t_q, t_k)
+        assert out_no_meta.shape == (5, 10)
+        # 输出应为有限值
+        assert torch.isfinite(out_no_meta).all()
+
+    def test_gradient_flow(self):
+        """梯度可以流经所有路径"""
+        bias = DynamicMemoryBias(d_model=64, n_dims=4, init_alpha=1.0)
+
+        query_ctx = torch.randn(64, requires_grad=True)
+        t_q = torch.arange(4).float()
+        t_k = torch.arange(8).float()
+        verdicts = torch.randn(8).clamp(-1, 1)
+        freqs = torch.randint(0, 5, (8,)).float()
+        sources = torch.rand(8)
+
+        out = bias(query_ctx, t_q, t_k, verdicts, freqs, sources)
+        loss = out.sum()
+        loss.backward()
+
+        assert query_ctx.grad is not None
+        # MLP 参数也有梯度
+        for param in bias.parameters():
+            if param.requires_grad:
+                assert param.grad is not None
+
+    def test_initial_weights_time_dominant(self):
+        """初始化时时间权重为 1，其余为 0"""
+        bias = DynamicMemoryBias(d_model=64, n_dims=4, init_alpha=1.0)
+
+        # 用零向量作为 context（不激活 MLP 的 weight 部分）
+        query_ctx = torch.zeros(64)
+        t_q = torch.arange(4).float()
+        t_k = torch.arange(8).float()
+        verdicts = torch.ones(8)
+
+        out_with_verdict = bias(query_ctx, t_q, t_k, verdicts)
+        out_no_verdict = bias(query_ctx, t_q, t_k)
+
+        # 初始时 w_verdict ≈ 0，所以有无 verdict 差异应该很小
+        diff = (out_with_verdict - out_no_verdict).abs().max()
+        assert diff < 0.1  # 初始时近似相等
+
+
+# ---------------------------------------------------------------------------
+# Backward Compatibility
+# ---------------------------------------------------------------------------
+
+
+class TestBackwardCompatibility:
+    """测试向后兼容性"""
+
+    def test_layer_old_api(self):
+        """旧 API 调用方式不报错"""
+        from memory_augmented_attention import MemoryBank, MemoryAugmentedTransformerLayer
+        layer = MemoryAugmentedTransformerLayer(
+            d_model=128, n_heads=4, top_k=16, init_alpha=1.0)
+        bank = MemoryBank(max_size=64)
+
+        x = torch.randn(2, 8, 128)
+        out = layer(x, memory_bank=bank, current_step=0,
+                    write_to_memory=True, causal=True)
+        assert out.shape == (2, 8, 128)
+
+    def test_layer_no_bank(self):
+        """无 bank 时正常工作"""
+        from memory_augmented_attention import MemoryAugmentedTransformerLayer
+        layer = MemoryAugmentedTransformerLayer(d_model=128, n_heads=4)
+
+        x = torch.randn(2, 8, 128)
+        out = layer(x)
+        assert out.shape == (2, 8, 128)
+
+    def test_memory_bank_old_write(self):
+        """MemoryBank 旧写入方式不报错"""
+        bank = MemoryBank(max_size=10)
+        result = bank.write(torch.randn(4, 32), torch.randn(
+            4, 32), torch.randn(4, 32), timestamp=0)
+        assert result is True
+
+    def test_retrieve_all_still_4_elements(self):
+        """retrieve_all() 仍返回 4 元素"""
+        bank = MemoryBank(max_size=10)
+        bank.write(torch.randn(4, 32), torch.randn(
+            4, 32), torch.randn(4, 32), timestamp=0)
+        result = bank.retrieve_all()
+        assert len(result) == 4  # K, V, Q, T

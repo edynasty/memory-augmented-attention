@@ -15,13 +15,17 @@ UnifiedMemoryAttention      – multi-head attention over the unified memory ban
 MemoryAugmentedTransformerLayer – full transformer layer (attention + FFN)
 """
 
-from .memory_bank import MemoryBank
-from .attention import TimeBias, UnifiedMemoryAttention
+from .memory_bank import MemoryBank, MemoryEntry, MemoryType, ConsolidationNetwork
+from .attention import TimeBias, DynamicMemoryBias, UnifiedMemoryAttention
 from .model import MemoryAugmentedTransformerLayer
 
 __all__ = [
     "MemoryBank",
+    "MemoryEntry",
+    "MemoryType",
+    "ConsolidationNetwork",
     "TimeBias",
+    "DynamicMemoryBias",
     "UnifiedMemoryAttention",
     "MemoryAugmentedTransformerLayer",
 ]
